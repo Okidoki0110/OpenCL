@@ -1,0 +1,351 @@
+#include <iostream>
+#include <fstream>
+#include <cstdlib>
+#include <ctime>
+#include <string>
+#include <cstring>
+
+#include <CL/cl.h>
+
+volatile cl_double *A,*B,*C; // vectorii A,B si C sunt pointeri
+
+const char* usage = "Usage: vector_opencl.exe N";
+
+std::string load_from_file(const char* path) {
+        std::ifstream source_file;
+        source_file.open(path);
+
+        if(!source_file.is_open())  {
+        std::cerr << "Nu se poate citi fisierul sursa!" << std::endl;
+        exit(-1);
+        }
+
+        source_file.seekg(0, source_file.end);
+        size_t file_size = source_file.tellg();
+        source_file.seekg(0, source_file.beg);
+
+        char* buffer = new (std::nothrow) char[file_size];
+        if(buffer == NULL) {
+            std::cerr << "Nu se poate aloca memorie pentru a citi fisierul sursa!" << std::endl;
+            exit(-1);
+        }
+
+        source_file.read(buffer,file_size);
+        source_file.close();
+
+        std::string result(buffer,file_size);
+        delete[] buffer;
+
+        return result;
+}
+
+int main(int argc,char** argv) {
+    if(argc != 2) {
+    std::cout << usage << std::endl;
+    return 0;
+    }
+
+    unsigned int N;
+
+    int r = sscanf(argv[1],"%d",&N); // r = numar de variabile parsate de sscanf; 1 -> e ok, 0 -> argv[1] nu e numar 
+
+    if(r != 1){std::cerr << argv[1] << " nu este un numar valid!" << std::endl; return -1;}
+
+    cl_int opencl_N = N;
+
+    std::cout << "Se aloca memorie pentru vectori!" << std::endl; 
+
+    A = new (std::nothrow) cl_double[N * 3]; // se aloca o singura data toti cei 3 vectori
+
+    if(A == NULL)
+    {std::cerr << "Nu se poate aloca memorie pentru cei trei vectori!" << std::endl; return -1;}
+
+    B = A + N;
+    C = B + N;
+    std::cout << "Se genereaza aleator vectorii A si B!" << std::endl;
+
+    srand(time(NULL));
+    for(unsigned int i=0; i<N; i++){A[i] = rand();}
+    for(unsigned int i=0; i<N; i++){B[i] = rand();}
+
+
+    std::cout << "Se incarca fisierul sursa pentru OpenCL!" << std::endl;
+    std::string kernel_source_code = load_from_file("kernel.cl");
+
+    size_t source_size = kernel_source_code.size();
+    const char* source_code = kernel_source_code.c_str();
+
+    cl_int opencl_status;
+
+    cl_uint platformCount;
+    cl_platform_id* platforms;
+    cl_uint deviceCount;
+    cl_device_id* devices;
+
+    cl_device_id opencl_device;
+    size_t opencl_group_size;
+    cl_int opencl_max_compute_units;
+
+    char buffer[1024];
+
+    std::string device_display_name;
+
+    // se obtine numarul de platforme compatibile
+    if(clGetPlatformIDs(0, NULL, &platformCount) != CL_SUCCESS) {
+        std::cerr << "clGetPlatformIDs(...) a dat eroare!" << std::endl;
+        return -1;
+    }
+
+    if(platformCount == 0) {
+        std::cerr << "Nu exista dispozitive compatibile cu OpenCL in acest computer!" << std::endl;
+        return -1;
+    }
+
+    platforms = new (std::nothrow) cl_platform_id[platformCount];
+    if(platforms == NULL) {
+        std::cerr << "Nu se poate aloca memorie pentru a stoca platformele compatibile cu OpenCL!" << std::endl;
+        return -1;
+    }
+
+    if(clGetPlatformIDs(platformCount, platforms, NULL) != CL_SUCCESS) {
+        std::cerr << "clGetPlatformIDs(...) a dat eroare!" << std::endl;
+        return -1;
+    }
+
+
+    bool is_selected_device = false;
+
+    for(unsigned int i=0; i<platformCount; i++)
+    {
+
+        if(clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_GPU | CL_DEVICE_TYPE_ACCELERATOR, 0, NULL, &deviceCount) != CL_SUCCESS) {
+        std::cerr << "clGetDeviceIDs(...) a dat eroare!" << std::endl;
+        return -1;
+        }
+
+        devices = new (std::nothrow) cl_device_id[deviceCount];
+        if(devices == NULL)
+        {
+        std::cerr << "Nu se poate aloca memorie pentru a stoca dispozitivele compatibile cu OpenCL!" << std::endl;
+        return -1;
+        }
+
+        if(clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_GPU | CL_DEVICE_TYPE_ACCELERATOR, deviceCount, devices, NULL) != CL_SUCCESS)
+        {
+        std::cerr << "clGetDeviceIDs(...) a dat eroare!" << std::endl;
+        return -1;
+        }
+
+
+    for (unsigned int j = 0; j<deviceCount; j++) {
+        opencl_device = devices[j];
+
+        cl_bool device_available;
+        if(clGetDeviceInfo(devices[j],CL_DEVICE_AVAILABLE,sizeof(cl_bool),(void*)&device_available,NULL) != CL_SUCCESS)
+        {
+        std::cerr << "clGetDeviceInfo(...) a dat eroare!" << std::endl;
+        return -1;
+        }
+
+        cl_bool compiler_available;
+        if(clGetDeviceInfo(devices[j],CL_DEVICE_COMPILER_AVAILABLE,sizeof(cl_bool),(void*)&compiler_available,NULL) != CL_SUCCESS)
+        {
+        std::cerr << "clGetDeviceInfo(...) a dat eroare!" << std::endl;
+        return -1;
+        }
+
+        if(!device_available or !compiler_available){continue;}
+
+
+
+        memset(buffer,0,sizeof(buffer));
+        if(clGetDeviceInfo(devices[j],CL_DEVICE_VENDOR,sizeof(buffer),(void*)buffer,NULL) != CL_SUCCESS)
+        {
+        std::cerr << "clGetDeviceInfo(...) a dat eroare!" << std::endl;
+        return -1;
+        }
+
+        device_display_name = buffer;
+
+
+        memset(buffer,0,sizeof(buffer));
+        if(clGetDeviceInfo(devices[j],CL_DEVICE_NAME,sizeof(buffer),(void*)buffer,NULL) != CL_SUCCESS)
+        {
+        std::cerr << "clGetDeviceInfo(...) a dat eroare!" << std::endl;
+        return -1;
+        }
+
+        device_display_name.append(" ");
+        device_display_name.append(buffer);
+
+        if(clGetDeviceInfo(devices[j],CL_DEVICE_MAX_COMPUTE_UNITS,sizeof(cl_int),(void*)&opencl_max_compute_units,NULL) != CL_SUCCESS)
+        {
+        std::cerr << "clGetDeviceInfo(...) a dat eroare!" << std::endl;
+        return -1;
+        }
+
+        std::cout << std::endl << "Am detectat dispozitivul compatibil " << device_display_name << std::endl;
+        std::cout << "Vrei sa folosesti acest dispozitiv? (y/n)" << std::endl; 
+
+        char response; std::cin>>response;
+        if(response == 'y' or response == 'Y'){std::cout << std::endl; is_selected_device = true; break;}
+
+    }
+
+
+    delete[] devices;
+    if(is_selected_device){break;}
+    }
+
+
+    if(!is_selected_device)
+    {
+    std::cerr << "Nu a fost selectat nici un dispozitiv compatibil!" << std::endl;
+    return -1;
+    }
+
+
+    cl_context opencl_ctx = clCreateContext(NULL,1,&opencl_device,NULL,NULL,&opencl_status);
+    if(opencl_status != CL_SUCCESS or opencl_ctx == NULL)
+    {
+    std::cerr << "clCreateContext(...) a dat eroare!" << std::endl;
+    return -1;
+    }
+
+
+    cl_program opencl_program = clCreateProgramWithSource(opencl_ctx,1,&source_code,&source_size,&opencl_status);
+    if(opencl_status != CL_SUCCESS or opencl_program == NULL)
+    {
+    std::cerr << "clCreateProgramWithSource(...) a dat eroare!" << std::endl;
+    return -1;
+    }
+
+
+    std::cout << "Se compileaza programul pentru OpenCL!" << std::endl;
+
+    opencl_status = clBuildProgram(opencl_program,1,&opencl_device,NULL,NULL,NULL);
+    if(opencl_status != CL_SUCCESS)
+    {
+    std::cerr << "clBuildProgram(...) a dat eroare!" << std::endl;
+
+    //se citeste outputul compilatorului / toolchainului
+    size_t ret_val_size;
+    clGetProgramBuildInfo(opencl_program,opencl_device,CL_PROGRAM_BUILD_LOG, 0, NULL, &ret_val_size);
+    char* build_log = new (std::nothrow) char[ret_val_size+1];
+    clGetProgramBuildInfo(opencl_program,opencl_device,CL_PROGRAM_BUILD_LOG,ret_val_size,build_log,NULL);
+    build_log[ret_val_size] = '\0';
+
+    std::cerr << build_log << std::endl;
+
+    delete[] build_log;
+    return -1;
+    }
+
+    cl_kernel opencl_kernel = clCreateKernel(opencl_program,"vector_add",&opencl_status);
+    if(opencl_status != CL_SUCCESS or opencl_kernel == NULL)
+    {
+    std::cerr << "clCreateKernel(...) a dat eroare!" << std::endl;
+    return -1;
+    } 
+
+
+    opencl_status = clGetKernelWorkGroupInfo(opencl_kernel,opencl_device,CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,sizeof(size_t),(void*)&opencl_group_size,NULL);
+    if(opencl_status != CL_SUCCESS)
+    {
+    std::cerr << "clGetKernelWorkGroupInfo(...) a dat eroare!" << std::endl;
+    return -1;
+    } 
+
+    std::cout << "Se aloca memorie pentru vectori A, B si C in memoria RAM a dispozitivului selectat!" << std::endl; 
+
+    cl_mem opencl_A = clCreateBuffer(opencl_ctx,CL_MEM_READ_ONLY,N*sizeof(cl_double),NULL,&opencl_status);
+    if(opencl_A == NULL or opencl_status != CL_SUCCESS)
+    {
+    std::cerr << "clCreateBuffer(...) a dat eroare!" << std::endl;
+    return -1;
+    }
+
+
+    cl_mem opencl_B = clCreateBuffer(opencl_ctx,CL_MEM_READ_ONLY,N*sizeof(cl_double),NULL,&opencl_status);
+    if(opencl_B == NULL or opencl_status != CL_SUCCESS)
+    {
+    std::cerr << "clCreateBuffer(...) a dat eroare!" << std::endl;
+    return -1;
+    }
+
+    cl_mem opencl_C = clCreateBuffer(opencl_ctx,CL_MEM_WRITE_ONLY,N*sizeof(cl_double),NULL,&opencl_status);
+    if(opencl_C == NULL or opencl_status != CL_SUCCESS)
+    {
+    std::cerr << "clCreateBuffer(...) a dat eroare!" << std::endl;
+    return -1;
+    }
+
+    cl_int Nthreads = opencl_group_size * opencl_max_compute_units;
+
+    clSetKernelArg(opencl_kernel,0,sizeof(cl_mem),&opencl_A);
+    clSetKernelArg(opencl_kernel,1,sizeof(cl_mem),&opencl_B);
+    clSetKernelArg(opencl_kernel,2,sizeof(cl_mem),&opencl_C);
+    clSetKernelArg(opencl_kernel,3,sizeof(cl_int),&opencl_N);
+    clSetKernelArg(opencl_kernel,4,sizeof(cl_int),&Nthreads);
+
+
+    std::cout << "Se creeaza coada de comenzi pentru dispozitivul selectat!" << std::endl;
+
+    cl_command_queue opencl_queue = clCreateCommandQueue(opencl_ctx,opencl_device,0,&opencl_status);
+    if(opencl_status != CL_SUCCESS or opencl_queue == NULL)
+    {
+    std::cerr << "clCreateCommandQueuel(...) a dat eroare!" << std::endl;
+    return -1;
+    }
+
+
+    std::cout << "Se copiaza vectorii A si B in memoria dispozitivului selectat!" << std::endl;
+
+    if(clEnqueueWriteBuffer(opencl_queue,opencl_A,CL_TRUE,0,N*sizeof(cl_double),(void*)A, 0, NULL, NULL) != CL_SUCCESS)
+    {
+    std::cerr << "clEnqueueWriteBuffer(...) a dat eroare!" << std::endl;
+    return -1;
+    }
+
+
+    if(clEnqueueWriteBuffer(opencl_queue,opencl_B,CL_TRUE,0,N*sizeof(cl_double),(void*)B,0,NULL,NULL) != CL_SUCCESS)
+    {
+    std::cerr << "clEnqueueWriteBuffer(...) a dat eroare!" << std::endl;
+    return -1;
+    }
+
+
+
+    std::cout << "Se va calcula C = A + B;" << std::endl; 
+
+    struct timespec start, end;
+
+    size_t global_item_size = Nthreads;
+    size_t local_item_size  = opencl_group_size;
+
+    std::cout << "Se calculeaza cu " << global_item_size << " thread-uri in grupuri de cate " << opencl_group_size << std::endl << std::endl;
+
+    clock_gettime(CLOCK_MONOTONIC,&start);
+
+    opencl_status = clEnqueueNDRangeKernel(opencl_queue,opencl_kernel, 1, NULL, &global_item_size, &local_item_size, 0, NULL, NULL); 
+
+    if(opencl_status != CL_SUCCESS)
+    {
+    std::cerr << "clEnqueueNDRangeKernel(...) a dat eroare!" << std::endl;
+    return -1;
+    }
+
+    clFinish(opencl_queue);
+
+
+    clock_gettime(CLOCK_MONOTONIC,&end);
+    double duration = (end.tv_sec - start.tv_sec) + ((end.tv_nsec - start.tv_nsec)/1000000000.0);
+
+    std::cout << "Suma vectorilor a durat "<< duration << " secunde!" << std::endl;
+
+    return 0;
+}
+
+
+
+
